@@ -200,19 +200,34 @@ jobs:
     if: always()
     
     steps:
-    - name: Check test results
+    - name: Collect job results
+      id: collect
       run: |
-        if [ "${{ needs.lint.result }}" == "failure" ] || \
-           [ "${{ needs.unit-tests.result }}" == "failure" ] || \
-           [ "${{ needs.integration-tests.result }}" == "failure" ] || \
-           [ "${{ needs.build.result }}" == "failure" ]; then
-          echo "❌ One or more jobs failed"
-          exit 1
+        failed_jobs=""
+        if [ "$LINT_RESULT" = "failure" ]; then failed_jobs+="Lint,"; fi
+        if [ "$UNIT_RESULT" = "failure" ]; then failed_jobs+="Unit Tests,"; fi
+        if [ "$INTEG_RESULT" = "failure" ]; then failed_jobs+="Integration Tests,"; fi
+        if [ "$BUILD_RESULT" = "failure" ]; then failed_jobs+="Build,"; fi
+
+        if [ -n "$failed_jobs" ]; then
+          # trim trailing comma
+          failed_jobs=${failed_jobs%,}
+          echo "failed=true" >> "$GITHUB_OUTPUT"
+          echo "failed_jobs=$failed_jobs" >> "$GITHUB_OUTPUT"
+          echo "Detected failed jobs: $failed_jobs"
+        else
+          echo "failed=false" >> "$GITHUB_OUTPUT"
+          echo "failed_jobs=none" >> "$GITHUB_OUTPUT"
+          echo "All checks passed"
         fi
-        echo "✅ All checks passed"
+      env:
+        LINT_RESULT: ${{ needs.lint.result }}
+        UNIT_RESULT: ${{ needs.unit-tests.result }}
+        INTEG_RESULT: ${{ needs.integration-tests.result }}
+        BUILD_RESULT: ${{ needs.build.result }}
     
     - name: Slack Notification (Success)
-      if: success()
+      if: ${{ steps.collect.outputs.failed == 'false' }}
       uses: slackapi/slack-github-action@v1.24.0
       with:
         webhook-url: ${{ secrets.SLACK_WEBHOOK_URL }}
@@ -259,7 +274,7 @@ jobs:
       continue-on-error: true
     
     - name: Slack Notification (Failure)
-      if: failure()
+      if: ${{ steps.collect.outputs.failed == 'true' }}
       uses: slackapi/slack-github-action@v1.24.0
       with:
         webhook-url: ${{ secrets.SLACK_WEBHOOK_URL }}
