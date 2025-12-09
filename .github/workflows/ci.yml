@@ -73,10 +73,10 @@ jobs:
         ports:
           - 3306:3306
         options: >-
-          --health-cmd="mysqladmin ping"
-          --health-interval=10s
-          --health-timeout=5s
-          --health-retries=10
+          --health-cmd="mysqladmin ping -h localhost"
+          --health-interval=5s
+          --health-timeout=10s
+          --health-retries=20
 
     steps:
     - uses: actions/checkout@v4
@@ -93,19 +93,33 @@ jobs:
     - name: Install MySQL client
       run: |
         sudo apt-get update
-        sudo apt-get install -y default-mysql-client
+        sudo apt-get install -y default-mysql-client netcat-openbsd
     
-    - name: Wait for MySQL to be ready
+    - name: Wait for MySQL service (via service health)
       run: |
-        for i in {1..45}; do
-          if mysqladmin ping -h localhost -u root -p${{ env.DB_PASSWORD }} 2>/dev/null; then
+        echo "Waiting for MySQL service to be healthy..."
+        for i in {1..30}; do
+          echo "Check $i/30..."
+          sleep 2
+        done
+        echo "✅ MySQL service should be ready (waited 60s)"
+    
+    - name: Test MySQL connectivity
+      run: |
+        echo "Testing MySQL connection..."
+        for i in {1..10}; do
+          if mysql -h 127.0.0.1 -u root -p${{ env.DB_PASSWORD }} -e "SELECT 1;" 2>/dev/null; then
             echo "✅ MySQL is ready"
             exit 0
           fi
-          echo "Waiting for MySQL... ($i/45)"
-          sleep 2
+          echo "Attempt $i/10 failed, retrying..."
+          sleep 3
         done
-        echo "❌ MySQL failed to start"
+        echo "❌ MySQL failed to respond"
+        echo "Debugging info:"
+        netstat -tuln || true
+        echo "MySQL service logs:"
+        docker ps -a || true
         exit 1
 
     - name: Create database tables
