@@ -1,0 +1,4 @@
+node_modules/
+.env
+mysql_data/
+.DS_Store
