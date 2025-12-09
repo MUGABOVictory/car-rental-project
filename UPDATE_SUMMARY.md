@@ -3,6 +3,7 @@
 ## Changes Made
 
 This project has been fully updated to reflect a **Car Rental Service** with DevOps capabilities, replacing previous "notes-app" references.
+hjgfg
 
 ### 1. **Package Metadata** (`package.json`)
 - ✅ Updated project name: `car-rental-app`
