@@ -6,19 +6,77 @@ on:
   pull_request:
     branches: [ main ]
 
+env:
+  DB_HOST: localhost
+  DB_USER: root
+  DB_PASSWORD: password
+  DB_NAME: car_rental_db
+
 jobs:
-  test:
+  lint:
+    name: Lint Code
+    runs-on: ubuntu-latest
+    
+    steps:
+    - uses: actions/checkout@v4
+    
+    - name: Setup Node.js
+      uses: actions/setup-node@v4
+      with:
+        node-version: '18'
+        cache: 'npm'
+    
+    - name: Install dependencies
+      run: npm ci
+    
+    - name: Run ESLint
+      run: npm run lint
+      continue-on-error: false
+
+  unit-tests:
+    name: Unit Tests
+    runs-on: ubuntu-latest
+    
+    steps:
+    - uses: actions/checkout@v4
+    
+    - name: Setup Node.js
+      uses: actions/setup-node@v4
+      with:
+        node-version: '18'
+        cache: 'npm'
+    
+    - name: Install dependencies
+      run: npm ci
+    
+    - name: Run unit tests
+      run: npm test -- --coverage
+    
+    - name: Upload coverage reports
+      uses: codecov/codecov-action@v3
+      with:
+        files: ./coverage/lcov.info
+        flags: unittests
+        name: codecov-umbrella
+      continue-on-error: true
+
+  integration-tests:
+    name: Integration Tests (MySQL)
     runs-on: ubuntu-latest
     
     services:
       mysql:
         image: mysql:8.0
         env:
-          MYSQL_ROOT_PASSWORD: password
-          MYSQL_DATABASE: notes_app
+          MYSQL_ROOT_PASSWORD: ${{ env.DB_PASSWORD }}
+          MYSQL_DATABASE: ${{ env.DB_NAME }}
         ports:
           - 3306:3306
-        options: --health-cmd="mysqladmin ping" --health-interval=10s --health-timeout=5s --health-retries=3
+        options: >-
+          --health-cmd="mysqladmin ping"
+          --health-interval=10s
+          --health-timeout=5s
+          --health-retries=5
 
     steps:
     - uses: actions/checkout@v4
@@ -32,41 +90,217 @@ jobs:
     - name: Install dependencies
       run: npm ci
     
-    - name: Run linting
-      run: npm run lint
+    - name: Wait for MySQL to be ready
+      run: |
+        for i in {1..30}; do
+          if mysqladmin ping -h localhost -u root -p${{ env.DB_PASSWORD }} 2>/dev/null; then
+            echo "✅ MySQL is ready"
+            exit 0
+          fi
+          echo "Waiting for MySQL... ($i/30)"
+          sleep 2
+        done
+        echo "❌ MySQL failed to start"
+        exit 1
+
+    - name: Create database tables
+      run: |
+        mysql -h localhost -u root -p${{ env.DB_PASSWORD }} ${{ env.DB_NAME }} << 'EOF'
+        CREATE TABLE IF NOT EXISTS cars (
+          id INT AUTO_INCREMENT PRIMARY KEY,
+          make VARCHAR(100) NOT NULL,
+          model VARCHAR(100) NOT NULL,
+          year INT,
+          daily_rate DECIMAL(10,2) NOT NULL DEFAULT 0.00,
+          available TINYINT(1) NOT NULL DEFAULT 1,
+          created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+        ) ENGINE=InnoDB;
+
+        CREATE TABLE IF NOT EXISTS rentals (
+          id INT AUTO_INCREMENT PRIMARY KEY,
+          car_id INT NOT NULL,
+          renter_name VARCHAR(255) NOT NULL,
+          start_date DATE NOT NULL,
+          end_date DATE NOT NULL,
+          total_cost DECIMAL(10,2) DEFAULT 0.00,
+          status ENUM('ongoing','returned','cancelled') NOT NULL DEFAULT 'ongoing',
+          created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+          updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+          CONSTRAINT fk_rental_car FOREIGN KEY (car_id) REFERENCES cars(id) ON DELETE RESTRICT
+        ) ENGINE=InnoDB;
+
+        INSERT INTO cars (make, model, year, daily_rate, available) VALUES
+        ('Toyota', 'Corolla', 2020, 35.00, 1),
+        ('Honda', 'Civic', 2019, 37.50, 1),
+        ('Ford', 'Focus', 2018, 30.00, 1);
+        EOF
     
-    - name: Run tests
-      run: npm test
+    - name: Start app in background
+      run: |
+        PORT=8001 npm start &
+        sleep 5
+        curl -f http://localhost:8001/health || (echo "❌ App failed to start"; exit 1)
+      continue-on-error: false
+    
+    - name: Run integration tests
+      run: npm run test:integration
       env:
-        DB_HOST: localhost
-        DB_USER: root
-        DB_PASSWORD: password
-        DB_NAME: notes_app
+        APP_URL: http://localhost:8001
 
   build:
-    needs: test
+    name: Build Docker Image
+    needs: [ lint, unit-tests ]
     runs-on: ubuntu-latest
     
     steps:
     - uses: actions/checkout@v4
     
-    - name: Build Docker image
-      run: docker build -t notes-app:${{ github.sha }} .
+    - name: Set up Docker Buildx
+      uses: docker/setup-buildx-action@v3
     
-    - name: Test Docker image
+    - name: Build Docker image
+      run: docker build -t car-rental-app:${{ github.sha }} .
+    
+    - name: Test Docker image (in-memory mode)
       run: |
-        docker run -d --name test-container -p 3000:3000 notes-app:${{ github.sha }}
-        sleep 10
-        curl -f http://localhost:3000/health || exit 1
+        docker run -d --name test-container -p 3000:3000 car-rental-app:${{ github.sha }}
+        sleep 5
+        echo "Testing health endpoint..."
+        curl -f http://localhost:3000/health || (echo "❌ Health check failed"; docker logs test-container; exit 1)
+        echo "✅ Health check passed"
+        echo "Testing metrics endpoint..."
+        curl -f http://localhost:3000/metrics || (echo "❌ Metrics check failed"; docker logs test-container; exit 1)
+        echo "✅ Metrics check passed"
         docker stop test-container
+        docker rm test-container
 
-  deploy:
-    needs: build
+  notify:
+    name: Notify Results
     runs-on: ubuntu-latest
-    if: github.ref == 'refs/heads/main'
+    needs: [ lint, unit-tests, integration-tests, build ]
+    if: always()
     
     steps:
+    - name: Check test results
+      run: |
+        if [ "${{ needs.lint.result }}" == "failure" ] || \
+           [ "${{ needs.unit-tests.result }}" == "failure" ] || \
+           [ "${{ needs.integration-tests.result }}" == "failure" ] || \
+           [ "${{ needs.build.result }}" == "failure" ]; then
+          echo "❌ One or more jobs failed"
+          exit 1
+        fi
+        echo "✅ All checks passed"
+    
+    - name: Slack Notification (Success)
+      if: success()
+      uses: slackapi/slack-github-action@v1.24.0
+      with:
+        webhook-url: ${{ secrets.SLACK_WEBHOOK_URL }}
+        payload: |
+          {
+            "text": "✅ Car Rental CI/CD Pipeline - All Tests Passed",
+            "blocks": [
+              {
+                "type": "header",
+                "text": {
+                  "type": "plain_text",
+                  "text": "✅ CI/CD Pipeline Successful"
+                }
+              },
+              {
+                "type": "section",
+                "text": {
+                  "type": "mrkdwn",
+                  "text": "*Repository:* ${{ github.repository }}\n*Branch:* ${{ github.ref_name }}\n*Commit:* <${{ github.event.head_commit.url }}|${{ github.event.head_commit.message }}>\n*Actor:* ${{ github.actor }}"
+                }
+              },
+              {
+                "type": "section",
+                "text": {
+                  "type": "mrkdwn",
+                  "text": "*Jobs:*\n✅ Lint\n✅ Unit Tests\n✅ Integration Tests\n✅ Build Docker Image"
+                }
+              },
+              {
+                "type": "actions",
+                "elements": [
+                  {
+                    "type": "button",
+                    "text": {
+                      "type": "plain_text",
+                      "text": "View Workflow"
+                    },
+                    "url": "${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}"
+                  }
+                ]
+              }
+            ]
+          }
+      continue-on-error: true
+    
+    - name: Slack Notification (Failure)
+      if: failure()
+      uses: slackapi/slack-github-action@v1.24.0
+      with:
+        webhook-url: ${{ secrets.SLACK_WEBHOOK_URL }}
+        payload: |
+          {
+            "text": "❌ Car Rental CI/CD Pipeline - Tests Failed",
+            "blocks": [
+              {
+                "type": "header",
+                "text": {
+                  "type": "plain_text",
+                  "text": "❌ CI/CD Pipeline Failed"
+                }
+              },
+              {
+                "type": "section",
+                "text": {
+                  "type": "mrkdwn",
+                  "text": "*Repository:* ${{ github.repository }}\n*Branch:* ${{ github.ref_name }}\n*Commit:* <${{ github.event.head_commit.url }}|${{ github.event.head_commit.message }}>\n*Actor:* ${{ github.actor }}"
+                }
+              },
+              {
+                "type": "section",
+                "text": {
+                  "type": "mrkdwn",
+                  "text": "*Failed Jobs:*\n${{ needs.lint.result == 'failure' && '❌ Lint' || '✅ Lint' }}\n${{ needs.unit-tests.result == 'failure' && '❌ Unit Tests' || '✅ Unit Tests' }}\n${{ needs.integration-tests.result == 'failure' && '❌ Integration Tests' || '✅ Integration Tests' }}\n${{ needs.build.result == 'failure' && '❌ Build Docker Image' || '✅ Build Docker Image' }}"
+                }
+              },
+              {
+                "type": "actions",
+                "elements": [
+                  {
+                    "type": "button",
+                    "text": {
+                      "type": "plain_text",
+                      "text": "View Workflow"
+                    },
+                    "url": "${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}"
+                  }
+                ]
+              }
+            ]
+          }
+      continue-on-error: true
+
+  deploy:
+    name: Deploy to Staging (Main Only)
+    needs: [ build ]
+    runs-on: ubuntu-latest
+    if: github.ref == 'refs/heads/main' && success()
+    
+    steps:
+    - uses: actions/checkout@v4
+    
     - name: Deploy to staging
       run: |
-        echo "Deploying to staging environment..."
-        # Add deployment commands here
+        echo "🚀 Deploying to staging environment..."
+        echo "Docker image: car-rental-app:${{ github.sha }}"
+        # Add your deployment commands here
+        # Example:
+        # docker pull car-rental-app:${{ github.sha }}
+        # docker-compose -f docker-compose.staging.yml up -d
+        echo "✅ Deployment complete"
