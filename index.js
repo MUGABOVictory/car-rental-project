@@ -2,6 +2,16 @@ const express = require('express');
 const mysql = require('mysql2/promise');
 const path = require('path');
 const app = express();
+const { daysInclusive } = require('./lib/utils');
+
+// Metrics tracking for DevOps monitoring
+const metrics = {
+  totalRentals: 0,
+  activeRentals: 0,
+  totalRevenue: 0,
+  requestCount: 0,
+  startTime: Date.now()
+};
 
 // Middleware
 app.use(express.json());
@@ -24,14 +34,12 @@ const dbConfig = {
 
 let db;
 
-// Metrics tracking for DevOps monitoring
-const metrics = {
-  totalRentals: 0,
-  activeRentals: 0,
-  totalRevenue: 0,
-  requestCount: 0,
-  startTime: Date.now()
-};
+// In-memory fallback when DB is not available (allows `docker run` without MySQL)
+let useInMemory = false;
+let inMemoryCars = [];
+let inMemoryRentals = [];
+
+// metrics declared above
 async function initDB() {
   try {
     db = await mysql.createConnection(dbConfig);
@@ -85,18 +93,34 @@ async function initDB() {
 
     console.log('Database connected and tables ensured');
   } catch (error) {
-    console.error('Database connection failed:', error);
-    process.exit(1);
+    console.error('Database connection failed, falling back to in-memory store:', error.message || error);
+    useInMemory = true;
+
+    // Seed some sample cars in-memory
+    inMemoryCars = [
+      { id: 1, make: 'Toyota', model: 'Corolla', year: 2020, daily_rate: '35.00', available: 1, created_at: new Date().toISOString() },
+      { id: 2, make: 'Honda', model: 'Civic', year: 2019, daily_rate: '37.50', available: 1, created_at: new Date().toISOString() },
+      { id: 3, make: 'Ford', model: 'Focus', year: 2018, daily_rate: '30.00', available: 1, created_at: new Date().toISOString() }
+    ];
+
+    console.warn('Running with in-memory data. Data will not persist across restarts.');
   }
 }
 
 // Update metrics from database
 async function updateMetrics() {
   try {
+    if (useInMemory) {
+      metrics.totalRentals = inMemoryRentals.length;
+      metrics.activeRentals = inMemoryRentals.filter(r => r.status === 'ongoing').length;
+      metrics.totalRevenue = inMemoryRentals.reduce((sum, r) => sum + parseFloat(r.total_cost || 0), 0);
+      return;
+    }
+
     const [rentals] = await db.execute('SELECT COUNT(*) as cnt FROM rentals');
     const [activeRentals] = await db.execute("SELECT COUNT(*) as cnt FROM rentals WHERE status = 'ongoing'");
     const [revenue] = await db.execute('SELECT SUM(total_cost) as total FROM rentals WHERE status IN ("ongoing", "returned")');
-    
+
     metrics.totalRentals = rentals[0].cnt || 0;
     metrics.activeRentals = activeRentals[0].cnt || 0;
     metrics.totalRevenue = parseFloat(revenue[0].total) || 0;
@@ -113,6 +137,7 @@ app.get('/', (req, res) => {
 // GET all cars
 app.get('/api/cars', async (req, res) => {
   try {
+    if (useInMemory) return res.json(inMemoryCars);
     const [rows] = await db.execute('SELECT * FROM cars ORDER BY id');
     res.json(rows);
   } catch (error) {
@@ -124,6 +149,17 @@ app.get('/api/cars', async (req, res) => {
 // GET all rentals (with car info)
 app.get('/api/rentals', async (req, res) => {
   try {
+    if (useInMemory) {
+      // join rental with car info
+      const rows = inMemoryRentals
+        .slice()
+        .sort((a, b) => new Date(b.created_at) - new Date(a.created_at))
+        .map(r => {
+          const car = inMemoryCars.find(c => c.id === r.car_id) || {};
+          return { ...r, make: car.make, model: car.model, year: car.year, daily_rate: car.daily_rate };
+        });
+      return res.json(rows);
+    }
     const [rows] = await db.execute(`
       SELECT r.*, c.make, c.model, c.year, c.daily_rate
       FROM rentals r
@@ -137,14 +173,7 @@ app.get('/api/rentals', async (req, res) => {
   }
 });
 
-// Helper to compute days between dates (inclusive)
-function daysInclusive(startDate, endDate) {
-  const start = new Date(startDate);
-  const end = new Date(endDate);
-  const diffMs = end - start;
-  const days = Math.ceil(diffMs / (1000 * 60 * 60 * 24)) + 1 - 1; // ensure at least 0
-  return Math.max(1, Math.round(diffMs / (1000 * 60 * 60 * 24)) + 1);
-}
+// use `daysInclusive` from `lib/utils`
 
 // POST create a rental
 app.post('/api/rentals', async (req, res) => {
@@ -155,6 +184,22 @@ app.post('/api/rentals', async (req, res) => {
   }
 
   try {
+    if (useInMemory) {
+      const car = inMemoryCars.find(c => c.id === Number(car_id));
+      if (!car) return res.status(404).json({ error: 'Car not found' });
+      if (car.available === 0) return res.status(400).json({ error: 'Car is not available for rental' });
+
+      const days = daysInclusive(start_date, end_date);
+      if (days === 0) return res.status(400).json({ error: 'Invalid dates' });
+      const total_cost = (parseFloat(car.daily_rate) * days).toFixed(2);
+
+      const newId = inMemoryRentals.length ? Math.max(...inMemoryRentals.map(r => r.id)) + 1 : 1;
+      const rental = { id: newId, car_id: Number(car_id), renter_name, start_date, end_date, total_cost, status: 'ongoing', created_at: new Date().toISOString(), updated_at: new Date().toISOString() };
+      inMemoryRentals.push(rental);
+      car.available = 0;
+      return res.status(201).json({ ...rental, message: 'Rental created (in-memory)' });
+    }
+
     // Fetch car and ensure available
     const [cars] = await db.execute('SELECT * FROM cars WHERE id = ? FOR UPDATE', [car_id]);
     if (!cars || cars.length === 0) {
@@ -196,6 +241,30 @@ app.put('/api/rentals/:id', async (req, res) => {
   const { status, end_date } = req.body;
 
   try {
+    if (useInMemory) {
+      const rental = inMemoryRentals.find(r => r.id === Number(id));
+      if (!rental) return res.status(404).json({ error: 'Rental not found' });
+
+      let total_cost = rental.total_cost;
+      if (end_date) {
+        const car = inMemoryCars.find(c => c.id === rental.car_id);
+        const days = daysInclusive(rental.start_date, end_date);
+        if (days === 0) return res.status(400).json({ error: 'Invalid end_date' });
+        total_cost = (parseFloat(car.daily_rate) * days).toFixed(2);
+        rental.end_date = end_date;
+        rental.total_cost = total_cost;
+      }
+      if (status) {
+        rental.status = status;
+        if (status === 'returned') {
+          const car = inMemoryCars.find(c => c.id === rental.car_id);
+          if (car) car.available = 1;
+        }
+      }
+      rental.updated_at = new Date().toISOString();
+      return res.json({ message: 'Rental updated (in-memory)', id: rental.id, status: rental.status, end_date: rental.end_date, total_cost: rental.total_cost });
+    }
+
     const [rows] = await db.execute('SELECT * FROM rentals WHERE id = ?', [id]);
     if (!rows || rows.length === 0) {
       return res.status(404).json({ error: 'Rental not found' });
@@ -237,6 +306,13 @@ app.put('/api/rentals/:id', async (req, res) => {
 app.delete('/api/rentals/:id', async (req, res) => {
   const { id } = req.params;
   try {
+    if (useInMemory) {
+      const idx = inMemoryRentals.findIndex(r => r.id === Number(id));
+      if (idx === -1) return res.status(404).json({ error: 'Rental not found' });
+      inMemoryRentals.splice(idx, 1);
+      return res.json({ message: 'Rental deleted (in-memory)' });
+    }
+
     const [result] = await db.execute('DELETE FROM rentals WHERE id = ?', [id]);
     if (result.affectedRows === 0) {
       return res.status(404).json({ error: 'Rental not found' });
