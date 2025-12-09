@@ -1,0 +1,218 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Car Rental</title>
+    <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.2/dist/css/bootstrap.min.css" rel="stylesheet">
+    <link href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.0.0/css/all.min.css" rel="stylesheet">
+</head>
+<body class="bg-light">
+    <div class="container mt-5">
+        <div class="row">
+            <div class="col-md-10 mx-auto">
+                <h1 class="text-center mb-4">
+                    <i class="fas fa-car text-primary"></i> Car Rental Service
+                </h1>
+
+                <div class="row g-4">
+                    <div class="col-md-6">
+                        <div class="card">
+                            <div class="card-header">
+                                <strong>Available Cars</strong>
+                            </div>
+                            <div class="card-body p-2">
+                                <div id="carsList">Loading cars...</div>
+                            </div>
+                        </div>
+                    </div>
+
+                    <div class="col-md-6">
+                        <div class="card mb-3">
+                            <div class="card-header">
+                                <strong>Create Rental</strong>
+                            </div>
+                            <div class="card-body">
+                                <form id="rentalForm">
+                                    <div class="mb-3">
+                                        <label for="carSelect" class="form-label">Select Car</label>
+                                        <select id="carSelect" class="form-select" required></select>
+                                    </div>
+                                    <div class="mb-3">
+                                        <label for="renterName" class="form-label">Renter Name</label>
+                                        <input id="renterName" class="form-control" required />
+                                    </div>
+                                    <div class="mb-3 row">
+                                        <div class="col">
+                                            <label class="form-label">Start Date</label>
+                                            <input id="startDate" type="date" class="form-control" required />
+                                        </div>
+                                        <div class="col">
+                                            <label class="form-label">End Date</label>
+                                            <input id="endDate" type="date" class="form-control" required />
+                                        </div>
+                                    </div>
+                                    <button class="btn btn-success" type="submit"><i class="fas fa-check"></i> Rent</button>
+                                </form>
+                            </div>
+                        </div>
+
+                        <div class="card">
+                            <div class="card-header">
+                                <strong>Active Rentals</strong>
+                            </div>
+                            <div class="card-body p-2">
+                                <div id="rentalsList">Loading rentals...</div>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+
+                <div class="mt-4 text-muted small">
+                    DevOps Potential: multi-table MySQL backend, health checks at <code>/health</code>, and metrics-ready endpoints for monitoring usage and availability.
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.2/dist/js/bootstrap.bundle.min.js"></script>
+    <script>
+        document.addEventListener('DOMContentLoaded', () => {
+            loadCars();
+            loadRentals();
+            document.getElementById('rentalForm').addEventListener('submit', createRental);
+        });
+
+        async function loadCars() {
+            try {
+                const res = await fetch('/api/cars');
+                const cars = await res.json();
+                const carsList = document.getElementById('carsList');
+                const carSelect = document.getElementById('carSelect');
+                carSelect.innerHTML = '';
+
+                if (!cars || cars.length === 0) {
+                    carsList.innerHTML = '<div class="text-center text-muted">No cars available</div>';
+                    return;
+                }
+
+                carsList.innerHTML = cars.map(car => `
+                    <div class="d-flex justify-content-between align-items-center border-bottom py-2">
+                        <div>
+                            <strong>${car.make} ${car.model}</strong> <small class="text-muted">(${car.year})</small>
+                            <div class="small">Rate: $${parseFloat(car.daily_rate).toFixed(2)}/day</div>
+                        </div>
+                        <div>
+                            ${car.available ? '<span class="badge bg-success">Available</span>' : '<span class="badge bg-secondary">Unavailable</span>'}
+                        </div>
+                    </div>
+                `).join('');
+
+                // populate select with available cars
+                cars.filter(c => c.available).forEach(c => {
+                    const opt = document.createElement('option');
+                    opt.value = c.id;
+                    opt.textContent = `${c.make} ${c.model} (${c.year}) - $${parseFloat(c.daily_rate).toFixed(2)}/day`;
+                    carSelect.appendChild(opt);
+                });
+            } catch (err) {
+                console.error('Error loading cars', err);
+                document.getElementById('carsList').innerHTML = '<div class="text-danger">Failed to load cars</div>';
+            }
+        }
+
+        async function loadRentals() {
+            try {
+                const res = await fetch('/api/rentals');
+                const rentals = await res.json();
+                const el = document.getElementById('rentalsList');
+
+                if (!rentals || rentals.length === 0) {
+                    el.innerHTML = '<div class="text-center text-muted">No rentals yet</div>';
+                    return;
+                }
+
+                el.innerHTML = rentals.map(r => `
+                    <div class="d-flex justify-content-between align-items-start border-bottom py-2">
+                        <div>
+                            <strong>${r.make} ${r.model}</strong>
+                            <div class="small">Renter: ${r.renter_name}</div>
+                            <div class="small">${r.start_date} → ${r.end_date}</div>
+                            <div class="small text-muted">Status: ${r.status} • $${parseFloat(r.total_cost).toFixed(2)}</div>
+                        </div>
+                        <div>
+                            ${r.status === 'ongoing' ? `<button class="btn btn-sm btn-primary" onclick="returnRental(${r.id})"><i class="fas fa-undo"></i> Return</button>` : ''}
+                        </div>
+                    </div>
+                `).join('');
+            } catch (err) {
+                console.error('Error loading rentals', err);
+                document.getElementById('rentalsList').innerHTML = '<div class="text-danger">Failed to load rentals</div>';
+            }
+        }
+
+        async function createRental(e) {
+            e.preventDefault();
+            const car_id = document.getElementById('carSelect').value;
+            const renter_name = document.getElementById('renterName').value.trim();
+            const start_date = document.getElementById('startDate').value;
+            const end_date = document.getElementById('endDate').value;
+
+            if (!car_id || !renter_name || !start_date || !end_date) return alert('All fields are required');
+
+            try {
+                const res = await fetch('/api/rentals', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ car_id, renter_name, start_date, end_date })
+                });
+
+                if (!res.ok) {
+                    const err = await res.json();
+                    return alert(err.error || 'Failed to create rental');
+                }
+
+                showAlert('Rental created', 'success');
+                document.getElementById('rentalForm').reset();
+                await loadCars();
+                await loadRentals();
+            } catch (err) {
+                console.error(err);
+                showAlert('Failed to create rental', 'danger');
+            }
+        }
+
+        async function returnRental(rentalId) {
+            if (!confirm('Mark this rental as returned?')) return;
+            try {
+                const res = await fetch(`/api/rentals/${rentalId}`, {
+                    method: 'PUT',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ status: 'returned' })
+                });
+
+                if (!res.ok) {
+                    const err = await res.json();
+                    return alert(err.error || 'Failed to update rental');
+                }
+
+                showAlert('Rental marked returned', 'success');
+                await loadCars();
+                await loadRentals();
+            } catch (err) {
+                console.error(err);
+                showAlert('Failed to update rental', 'danger');
+            }
+        }
+
+        function showAlert(message, type='info') {
+            const alertDiv = document.createElement('div');
+            alertDiv.className = `alert alert-${type} alert-dismissible fade show position-fixed top-0 end-0 m-3`;
+            alertDiv.style.zIndex = 9999;
+            alertDiv.innerHTML = `${message} <button type="button" class="btn-close" data-bs-dismiss="alert"></button>`;
+            document.body.appendChild(alertDiv);
+            setTimeout(() => alertDiv.remove(), 4000);
+        }
+    </script>
+</body>
+</html>
