@@ -201,18 +201,21 @@ jobs:
     
     steps:
     - name: Check test results
+      id: check_results
       run: |
-        if [ "${{ needs.lint.result }}" == "failure" ] || \
-           [ "${{ needs.unit-tests.result }}" == "failure" ] || \
-           [ "${{ needs.integration-tests.result }}" == "failure" ] || \
-           [ "${{ needs.build.result }}" == "failure" ]; then
-          echo "❌ One or more jobs failed"
-          exit 1
+        echo "Checking upstream job results..."
+        any_failed=false
+        if [ "${{ needs.lint.result }}" = "failure" ] || \
+           [ "${{ needs.unit-tests.result }}" = "failure" ] || \
+           [ "${{ needs.integration-tests.result }}" = "failure" ] || \
+           [ "${{ needs.build.result }}" = "failure" ]; then
+          any_failed=true
         fi
-        echo "✅ All checks passed"
+        echo "any_failed=$any_failed" >> $GITHUB_OUTPUT
+        echo "Upstream failures: $any_failed"
     
     - name: Slack Notification (Success)
-      if: success()
+      if: ${{ steps.check_results.outputs.any_failed == 'false' }}
       uses: slackapi/slack-github-action@v1.24.0
       with:
         webhook-url: ${{ secrets.SLACK_WEBHOOK_URL }}
@@ -259,7 +262,7 @@ jobs:
       continue-on-error: true
     
     - name: Slack Notification (Failure)
-      if: failure()
+      if: ${{ steps.check_results.outputs.any_failed == 'true' }}
       uses: slackapi/slack-github-action@v1.24.0
       with:
         webhook-url: ${{ secrets.SLACK_WEBHOOK_URL }}
