@@ -76,7 +76,7 @@ jobs:
           --health-cmd="mysqladmin ping"
           --health-interval=10s
           --health-timeout=5s
-          --health-retries=5
+          --health-retries=10
 
     steps:
     - uses: actions/checkout@v4
@@ -89,15 +89,20 @@ jobs:
     
     - name: Install dependencies
       run: npm ci
+
+    - name: Install MySQL client
+      run: |
+        sudo apt-get update
+        sudo apt-get install -y default-mysql-client
     
     - name: Wait for MySQL to be ready
       run: |
-        for i in {1..30}; do
+        for i in {1..45}; do
           if mysqladmin ping -h localhost -u root -p${{ env.DB_PASSWORD }} 2>/dev/null; then
             echo "✅ MySQL is ready"
             exit 0
           fi
-          echo "Waiting for MySQL... ($i/30)"
+          echo "Waiting for MySQL... ($i/45)"
           sleep 2
         done
         echo "❌ MySQL failed to start"
