@@ -230,7 +230,7 @@ jobs:
       if: ${{ steps.collect.outputs.failed == 'false' }}
       uses: slackapi/slack-github-action@v1.24.0
       with:
-        webhook-url: ${{ secrets.SLACK_WEBHOOK_URL }}
+        webhook-url: ${{ secrets.vip }}
         payload: |
           {
             "text": "✅ Car Rental CI/CD Pipeline - All Tests Passed",
@@ -277,7 +277,7 @@ jobs:
       if: ${{ steps.collect.outputs.failed == 'true' }}
       uses: slackapi/slack-github-action@v1.24.0
       with:
-        webhook-url: ${{ secrets.SLACK_WEBHOOK_URL }}
+        webhook-url: ${{ secrets.vip }}
         payload: |
           {
             "text": "❌ Car Rental CI/CD Pipeline - Tests Failed",
