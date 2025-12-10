@@ -1,0 +1,223 @@
+name: Release & Deploy
+
+on:
+  push:
+    tags:
+      - 'v*.*.*'
+
+env:
+  REGISTRY: docker.io
+  IMAGE_NAME: ${{ github.repository }}
+
+jobs:
+  release:
+    name: Create GitHub Release
+    runs-on: ubuntu-latest
+    
+    steps:
+    - uses: actions/checkout@v4
+    
+    - name: Extract version from tag
+      id: version
+      run: |
+        VERSION=${GITHUB_REF#refs/tags/v}
+        echo "version=$VERSION" >> "$GITHUB_OUTPUT"
+        echo "tag_name=v$VERSION" >> "$GITHUB_OUTPUT"
+        echo "Release version: $VERSION"
+    
+    - name: Generate release notes
+      id: notes
+      run: |
+        CHANGELOG=$(cat << 'EOF'
+        ## Car Rental App Release ${{ steps.version.outputs.version }}
+        
+        ### Features
+        - Car fleet management system
+        - Rental booking and management
+        - DevOps monitoring with metrics endpoints
+        - Docker containerization
+        - MySQL database backend
+        
+        ### Docker Image
+        - **Image**: `${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:${{ steps.version.outputs.version }}`
+        - **Tag**: `latest`
+        
+        ### Installation
+        ```bash
+        docker pull ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:${{ steps.version.outputs.version }}
+        docker run -p 3000:3000 ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:${{ steps.version.outputs.version }}
+        ```
+        
+        ### API Endpoints
+        - `GET /api/cars` - List all cars
+        - `GET /api/rentals` - List all rentals
+        - `POST /api/rentals` - Create rental
+        - `PUT /api/rentals/:id` - Update rental
+        - `DELETE /api/rentals/:id` - Delete rental
+        - `GET /health` - Health check
+        - `GET /metrics` - DevOps metrics
+        
+        ### Database
+        - MySQL 8.0
+        - Tables: `cars`, `rentals`
+        - Automatic schema initialization
+        
+        **Release Date**: $(date -u +'%Y-%m-%d %H:%M:%S UTC')
+        **Commit**: [${{ github.sha }}](${{ github.event.repository.html_url }}/commit/${{ github.sha }})
+        EOF
+        )
+        echo "notes<<NOTESEOF" >> "$GITHUB_OUTPUT"
+        echo "$CHANGELOG" >> "$GITHUB_OUTPUT"
+        echo "NOTESEOF" >> "$GITHUB_OUTPUT"
+    
+    - name: Create GitHub Release
+      uses: softprops/action-gh-release@v1
+      with:
+        tag_name: ${{ steps.version.outputs.tag_name }}
+        name: Release ${{ steps.version.outputs.version }}
+        body: ${{ steps.notes.outputs.notes }}
+        draft: false
+        prerelease: false
+      env:
+        GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+  build-and-push:
+    name: Build and Push Docker Image
+    runs-on: ubuntu-latest
+    needs: [ release ]
+    
+    permissions:
+      contents: read
+      packages: write
+    
+    steps:
+    - uses: actions/checkout@v4
+    
+    - name: Extract version from tag
+      id: version
+      run: |
+        VERSION=${GITHUB_REF#refs/tags/v}
+        echo "version=$VERSION" >> "$GITHUB_OUTPUT"
+        echo "Release image tag: $VERSION"
+    
+    - name: Set up Docker Buildx
+      uses: docker/setup-buildx-action@v3
+    
+    - name: Login to Docker Hub
+      uses: docker/login-action@v3
+      with:
+        username: ${{ secrets.DOCKER_USERNAME }}
+        password: ${{ secrets.DOCKER_PASSWORD }}
+      if: secrets.DOCKER_USERNAME != ''
+    
+    - name: Build and push Docker image
+      uses: docker/build-push-action@v5
+      with:
+        context: .
+        push: ${{ secrets.DOCKER_USERNAME != '' }}
+        tags: |
+          ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:${{ steps.version.outputs.version }}
+          ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:latest
+        cache-from: type=registry,ref=${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:buildcache
+        cache-to: type=registry,ref=${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:buildcache,mode=max
+        labels: |
+          org.opencontainers.image.version=${{ steps.version.outputs.version }}
+          org.opencontainers.image.source=${{ github.event.repository.html_url }}
+          org.opencontainers.image.revision=${{ github.sha }}
+    
+    - name: Log image build summary
+      run: |
+        echo "✅ Docker image built successfully"
+        echo "Repository: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}"
+        echo "Tags:"
+        echo "  - ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:${{ steps.version.outputs.version }}"
+        echo "  - ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:latest"
+    
+    - name: Slack Notification (Release)
+      uses: slackapi/slack-github-action@v1.24.0
+      with:
+        webhook-url: ${{ secrets.vip }}
+        payload: |
+          {
+            "text": "🚀 Car Rental App Released - v${{ steps.version.outputs.version }}",
+            "blocks": [
+              {
+                "type": "header",
+                "text": {
+                  "type": "plain_text",
+                  "text": "🚀 Release v${{ steps.version.outputs.version }} Published"
+                }
+              },
+              {
+                "type": "section",
+                "text": {
+                  "type": "mrkdwn",
+                  "text": "*Repository:* ${{ github.repository }}\n*Release:* v${{ steps.version.outputs.version }}\n*Commit:* <${{ github.event.repository.html_url }}/commit/${{ github.sha }}|${{ github.sha }}>"
+                }
+              },
+              {
+                "type": "section",
+                "text": {
+                  "type": "mrkdwn",
+                  "text": "*Docker Image:*\n```\n${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:${{ steps.version.outputs.version }}\n${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:latest\n```"
+                }
+              },
+              {
+                "type": "actions",
+                "elements": [
+                  {
+                    "type": "button",
+                    "text": {
+                      "type": "plain_text",
+                      "text": "View Release"
+                    },
+                    "url": "${{ github.event.repository.html_url }}/releases/tag/v${{ steps.version.outputs.version }}"
+                  },
+                  {
+                    "type": "button",
+                    "text": {
+                      "type": "plain_text",
+                      "text": "View Workflow"
+                    },
+                    "url": "${{ github.event.repository.html_url }}/actions/runs/${{ github.run_id }}"
+                  }
+                ]
+              }
+            ]
+          }
+      continue-on-error: true
+      if: secrets.vip != ''
+
+  verify:
+    name: Verify Release Artifacts
+    runs-on: ubuntu-latest
+    needs: [ build-and-push ]
+    if: secrets.DOCKER_USERNAME != ''
+    
+    steps:
+    - name: Extract version from tag
+      id: version
+      run: |
+        VERSION=${GITHUB_REF#refs/tags/v}
+        echo "version=$VERSION" >> "$GITHUB_OUTPUT"
+    
+    - name: Login to Docker Hub
+      uses: docker/login-action@v3
+      with:
+        username: ${{ secrets.DOCKER_USERNAME }}
+        password: ${{ secrets.DOCKER_PASSWORD }}
+    
+    - name: Verify image exists
+      run: |
+        docker pull ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:${{ steps.version.outputs.version }}
+        docker images | grep ${{ env.IMAGE_NAME }}
+    
+    - name: Test image health check
+      run: |
+        docker run -d --name test-release -p 3001:3000 ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:${{ steps.version.outputs.version }}
+        sleep 5
+        curl -f http://localhost:3001/health || (echo "❌ Health check failed"; docker logs test-release; exit 1)
+        echo "✅ Health check passed"
+        curl -f http://localhost:3001/metrics || (echo "❌ Metrics check failed"; docker logs test-release; exit 1)
+        echo "✅ Metrics check passed"
+        docker stop test-release
